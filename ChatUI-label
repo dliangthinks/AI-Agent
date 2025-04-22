@@ -1,8 +1,8 @@
 import sys
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                               QTextEdit, QPlainTextEdit, QLabel, QScrollArea, QSplitter)
-from PySide6.QtGui import QFont, QColor, QPalette              
-from PySide6.QtCore import Qt, Signal
+                               QTextEdit, QPlainTextEdit, QLabel, QScrollArea, QSplitter, QSizePolicy)
+from PySide6.QtGui import QFont, QColor, QPalette, QFontMetrics
+from PySide6.QtCore import Qt, Signal, QTimer, QSize
 
 class InputTextEdit(QPlainTextEdit):
     enter_pressed = Signal()
@@ -26,8 +26,10 @@ class InputTextEdit(QPlainTextEdit):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Return:
             if event.modifiers() & Qt.ShiftModifier:
-                super().keyPressEvent(event)
-                self.document().appendPlainText("\n")
+                cursor = self.textCursor()
+                cursor.insertText("\n")
+                self.setTextCursor(cursor)
+                self.adjust_height()
             else:
                 self.enter_pressed.emit()
                 # Shrink the input area back to one line
@@ -46,50 +48,46 @@ class InputTextEdit(QPlainTextEdit):
             if new_pixel_height != self.height():
                 self.setFixedHeight(new_pixel_height+10)
 
-class CustomTextBlock(QTextEdit):
-    def __init__(self, text, is_user=False, parent=None):
-        super().__init__(parent)
-        self.setReadOnly(True)
-        self.setFont(QFont("Arial", 12 if is_user else 14))
-        self.setPlainText(text)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+class CustomTextBlock(QLabel):
+    def __init__(self, text, is_user=False):
+        super().__init__(text)
+        self.is_user = is_user
+        self.setWordWrap(True)
+        self.setTextFormat(Qt.RichText)
+        self.setAlignment(Qt.AlignLeft)
+        self.setStyleSheet(self.get_stylesheet())
         
-        palette = self.palette()
-        if is_user:
-            palette.setColor(QPalette.Base, QColor(64, 64, 64))  # Dark gray
-            self.setStyleSheet("""
-                QTextEdit {
-                    border-radius: 15px;
-                    padding: 5px;
-                    background-color: #404040;
-                }
-            """)
-        else:
-            palette.setColor(QPalette.Base, Qt.black)
-            self.setStyleSheet("""
-                QTextEdit {
-                    padding: 5px;
-                    background-color: black;
-                }
-            """)
-        palette.setColor(QPalette.Text, Qt.white)
-        self.setPalette(palette)
+        # Set maximum width
+        self.setMaximumWidth(400)
+        
+        # Adjust size
+        self.adjustSize()
 
-        self.adjust_size()
+    def get_stylesheet(self):
+        base_style = """
+            QLabel {
+                background-color: %s;
+                color: white;
+                border-radius: 15px;
+                padding: 10px;
+                margin: 5px;
+            }
+        """
+        color = "#404040" if self.is_user else "black"
+        return base_style % color
 
-    def adjust_size(self):
-        # these numbers are very important for the radius to show!!!!
-        self.document().setTextWidth(self.viewport().width() - 10)  # Account for padding
-        height = self.document().size().height() + 10  # Add some extra space
-        self.setFixedHeight(int(height))
+    def sizeHint(self):
+        width = min(self.maximumWidth(), super().sizeHint().width())
+        return QSize(width, super().sizeHint().height())
 
 class ChatLog(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.layout = QVBoxLayout(self)
-        self.layout.setSpacing(5)
-        self.layout.setContentsMargins(5, 5, 5, 5)
+        self.layout.setAlignment(Qt.AlignTop)
+        self.layout.setSpacing(10)
+        self.layout.setContentsMargins(10, 10, 10, 10)
         self.setLayout(self.layout)
         
         # Set black background
@@ -100,16 +98,37 @@ class ChatLog(QWidget):
 
     def add_message(self, text, is_user=False):
         block = CustomTextBlock(text, is_user)
+        wrapper = QWidget()
+        wrapper_layout = QHBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        
         if is_user:
-            wrapper = QWidget()
-            wrapper_layout = QHBoxLayout(wrapper)
-            # this line adds an invisible box in front of the next widget
             wrapper_layout.addStretch()
             wrapper_layout.addWidget(block)
-            self.layout.addWidget(wrapper)
         else:
-            self.layout.addWidget(block)
-        self.layout.addStretch(1)
+            block.setMaximumWidth(int(self.width() * 0.9))  # 90% of window width
+            wrapper_layout.addWidget(block)
+            wrapper_layout.addStretch()
+        
+        self.layout.addWidget(wrapper)
+        
+        # Scroll to the bottom
+        QTimer.singleShot(0, self.scroll_to_bottom)
+
+    def scroll_to_bottom(self):
+        if self.parent() and isinstance(self.parent(), QScrollArea):
+            scrollbar = self.parent().verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Adjust system message widths when window is resized
+        for i in range(self.layout.count()):
+            item = self.layout.itemAt(i).widget()
+            if isinstance(item, QWidget):
+                for child in item.children():
+                    if isinstance(child, CustomTextBlock) and not child.is_user:
+                        child.setMaximumWidth(int(self.width() * 0.9))
 
 class ChatbotGUI(QMainWindow):
     def __init__(self):
@@ -129,20 +148,20 @@ class ChatbotGUI(QMainWindow):
         chat_layout = QVBoxLayout(chat_widget)
 
         self.chat_log = ChatLog()
-        chat_scroll_area = QScrollArea()
-        chat_scroll_area.setWidgetResizable(True)
-        chat_scroll_area.setWidget(self.chat_log)
+        self.chat_scroll_area = QScrollArea()
+        self.chat_scroll_area.setWidgetResizable(True)
+        self.chat_scroll_area.setWidget(self.chat_log)
 
         # Set black background for chat scroll area
-        chat_scroll_palette = chat_scroll_area.palette()
+        chat_scroll_palette = self.chat_scroll_area.palette()
         chat_scroll_palette.setColor(QPalette.Window, Qt.black)
-        chat_scroll_area.setAutoFillBackground(True)
-        chat_scroll_area.setPalette(chat_scroll_palette)
+        self.chat_scroll_area.setAutoFillBackground(True)
+        self.chat_scroll_area.setPalette(chat_scroll_palette)
 
         self.msg_entry = InputTextEdit()
         self.msg_entry.enter_pressed.connect(self.send_message)
 
-        chat_layout.addWidget(chat_scroll_area)
+        chat_layout.addWidget(self.chat_scroll_area)
         chat_layout.addWidget(self.msg_entry)
 
         # Right side: Project Knowledge Base
@@ -191,6 +210,12 @@ class ChatbotGUI(QMainWindow):
 
     def update_chat_log(self, sender, message):
         self.chat_log.add_message(f"{sender}: {message}", sender == "You")
+        # Ensure scrolling to the bottom after adding a message
+        QTimer.singleShot(0, self.scroll_to_bottom)
+
+    def scroll_to_bottom(self):
+        scrollbar = self.chat_scroll_area.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
         
     def get_agent_response(self, user_message):
         return "This is a placeholder response from the PM Helper."
@@ -199,7 +224,7 @@ class ChatbotGUI(QMainWindow):
         self.kb_text.setPlainText(content)
 
 if __name__ == '__main__':
-    app = QApplication([])
+    app = QApplication(sys.argv)
     window = ChatbotGUI()
     window.show()
-    app.exec()
+    sys.exit(app.exec())
